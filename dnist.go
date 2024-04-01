@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/netip"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/zariel/dnist/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/sync/errgroup"
 )
 
 func Run(conf *config.Conf) error {
@@ -30,10 +33,29 @@ func Run(conf *config.Conf) error {
 	}
 
 	log.Info("running with config", zap.Any("config", conf))
-	if err := dns.ListenAndServe(conf.ListenAddr, conf.ListenNet, &Server{routes: routes, log: log, ctx: ctx}); err != nil {
-		return fmt.Errorf("unable to start server %q: %w", conf.ListenAddr, err)
-	}
-	return nil
+
+	var eg errgroup.Group
+	eg.Go(func() error {
+		if err := dns.ListenAndServe(conf.ListenAddr, conf.ListenNet, &Server{routes: routes, log: log, ctx: ctx}); err != nil {
+			return fmt.Errorf("unable to start server %q: %w", conf.ListenAddr, err)
+		}
+		return nil
+	})
+	eg.Go(func() error {
+		addr := conf.HTTPAddr
+		if addr == "" {
+			addr = "127.0.0.1:8080"
+		}
+		log.Info("starting http server", zap.String("addr", addr))
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			// TODO: more soffisticated health check?
+			w.WriteHeader(http.StatusOK)
+		})
+		mux.Handle("/metrics", promhttp.Handler())
+		return http.ListenAndServe(addr, mux)
+	})
+	return eg.Wait()
 }
 
 func routesFromConf(ctx context.Context, conf *config.Conf, log *zap.Logger) ([]routeMatcher, error) {
@@ -48,7 +70,7 @@ func routesFromConf(ctx context.Context, conf *config.Conf, log *zap.Logger) ([]
 				server.HealthCheck = pool.HealthCheck
 			}
 
-			client, err := newClient(ctx, server, log)
+			client, err := newClient(ctx, pool.Name, server, log)
 			if err != nil {
 				// TODO: this will include dial failures which really shouldnt stop us from
 				// starting the server, the pool should be marked down and we should reconnect
