@@ -8,8 +8,30 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/zariel/dnist/config"
 	"go.uber.org/zap"
+)
+
+func registerMetric[T prometheus.Collector](m T) T {
+	prometheus.MustRegister(m)
+	return m
+}
+
+var (
+	poolLatency = registerMetric(prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "dnist",
+		Subsystem: "client",
+		Name:      "pool_latency_seconds",
+		Help:      "Latency of client pool requests",
+	}, []string{"pool"}))
+
+	clientResponses = registerMetric(prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "dnist",
+		Subsystem: "client",
+		Name:      "responses_total",
+		Help:      "Total number of responses by code",
+	}, []string{"pool", "rcode"}))
 )
 
 type checkClient interface {
@@ -91,10 +113,12 @@ type client struct {
 	conn *dns.Conn
 	log  *zap.Logger
 
+	poolName string
+
 	health *healthCheck
 }
 
-func newClient(ctx context.Context, conf config.Server, log *zap.Logger) (*client, error) {
+func newClient(ctx context.Context, poolName string, conf config.Server, log *zap.Logger) (*client, error) {
 	c := &dns.Client{
 		Timeout: conf.Timeout,
 	}
@@ -123,10 +147,11 @@ func newClient(ctx context.Context, conf config.Server, log *zap.Logger) (*clien
 	}
 
 	client := &client{
-		c:    c,
-		conn: conn,
-		addr: addr,
-		log:  log,
+		c:        c,
+		conn:     conn,
+		addr:     addr,
+		log:      log,
+		poolName: poolName,
 	}
 
 	if conf.HealthCheck != nil {
@@ -146,8 +171,16 @@ func (c *client) Close() error {
 }
 
 func (c *client) Send(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
+	timer := prometheus.NewTimer(poolLatency.WithLabelValues(c.poolName))
+	defer timer.ObserveDuration()
+
 	q := m.Question[0]
 	c.log.Debug("sending query", zap.String("query", q.Name), zap.Stringer("type", dns.Type(q.Qtype)), zap.Stringer("class", dns.Class(q.Qclass)))
 	resp, _, err := c.c.ExchangeWithConnContext(ctx, m, c.conn)
+	if err != nil {
+		clientResponses.WithLabelValues(c.poolName, "error").Inc()
+	} else {
+		clientResponses.WithLabelValues(c.poolName, dns.RcodeToString[resp.Rcode]).Inc()
+	}
 	return resp, err
 }

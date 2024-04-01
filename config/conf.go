@@ -55,6 +55,8 @@ type Conf struct {
 	// ListenNet is is one of "udp", "tcp", "tcp-tls". The default value is "udp" if unset.
 	ListenNet string
 
+	HTTPAddr string `yaml:"httpAddr"`
+
 	Pools  []Pool
 	Routes []Route
 }
