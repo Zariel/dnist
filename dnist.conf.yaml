@@ -5,6 +5,12 @@ pools:
   - name: blocky
     servers:
       - addr: 10.5.0.4
+        healthcheck:
+          checkName: cloudflare-dns.com.
+          interval: 5s
+          timeout: 2s
+          failureThreshold: 3
+          successThreshold: 1
   - name: bind
     servers:
       - addr: 10.5.0.3

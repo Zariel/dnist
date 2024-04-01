@@ -3,13 +3,18 @@ package config
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 )
 
 type HealthCheck struct {
-	// TODO
+	CheckName        string `yaml:"checkName"`
+	Timeout          time.Duration
+	Interval         time.Duration
+	SuccessThreshold int `yaml:"successThreshold"`
+	FailureThreshold int `yaml:"failureThreshold"`
 }
 
 type Server struct {
@@ -17,14 +22,15 @@ type Server struct {
 	// net is is one of "udp", "tcp", "tcp-tls". The default value is "udp" if unset.
 	Net string
 
+	// optional timeout
+	Timeout time.Duration
+
 	HealthCheck *HealthCheck
-	// TODO: timeouts
 }
 
 type Pool struct {
-	Name        string
-	HealthCheck *HealthCheck
-	Servers     []Server
+	Name    string
+	Servers []Server
 }
 
 type ForwardPool struct {

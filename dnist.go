@@ -1,6 +1,7 @@
 package dnist
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -8,29 +9,34 @@ import (
 	"github.com/miekg/dns"
 	"github.com/zariel/dnist/config"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func Run(conf *config.Conf) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	zapconf := zap.NewProductionConfig()
+	zapconf.EncoderConfig.EncodeTime = zapcore.RFC3339TimeEncoder
 	zapconf.Level.SetLevel(conf.LogLevel)
 	log, err := zapconf.Build()
 	if err != nil {
 		return fmt.Errorf("unable to create logger: %w", err)
 	}
 
-	routes, err := routesFromConf(conf, log)
+	routes, err := routesFromConf(ctx, conf, log)
 	if err != nil {
 		return fmt.Errorf("unable to build routes: %w", err)
 	}
 
 	log.Info("running with config", zap.Any("config", conf))
-	if err := dns.ListenAndServe(conf.ListenAddr, conf.ListenNet, &Frontend{routes: routes, log: log}); err != nil {
+	if err := dns.ListenAndServe(conf.ListenAddr, conf.ListenNet, &Server{routes: routes, log: log, ctx: ctx}); err != nil {
 		return fmt.Errorf("unable to start server %q: %w", conf.ListenAddr, err)
 	}
 	return nil
 }
 
-func routesFromConf(conf *config.Conf, log *zap.Logger) ([]routeMatcher, error) {
+func routesFromConf(ctx context.Context, conf *config.Conf, log *zap.Logger) ([]routeMatcher, error) {
 	pools := make(map[string]*downstreamPool, len(conf.Pools))
 	for _, pool := range conf.Pools {
 		s := &downstreamPool{
@@ -38,7 +44,7 @@ func routesFromConf(conf *config.Conf, log *zap.Logger) ([]routeMatcher, error) 
 		}
 		// TODO: configure the pool with other options
 		for i, server := range pool.Servers {
-			client, err := newClient(server, log)
+			client, err := newClient(ctx, server, log)
 			if err != nil {
 				// TODO: this will include dial failures which really shouldnt stop us from
 				// starting the server, the pool should be marked down and we should reconnect
@@ -61,10 +67,16 @@ func routesFromConf(conf *config.Conf, log *zap.Logger) ([]routeMatcher, error) 
 }
 
 func buildRoute(pools map[string]*downstreamPool, r config.Route) (routeMatcher, error) {
-	p, ok := pools[r.Forward.Pool]
-	if !ok {
-		// TODO: canonicalise the route so the config error can be more helpful
-		return nil, fmt.Errorf("config route references unknown pool: %q", r.Forward.Pool)
+	var handler handler
+	if r.Drop {
+		handler = handlerFunc(dropHandler)
+	} else {
+		p, ok := pools[r.Forward.Pool]
+		if !ok {
+			// TODO: canonicalise the route so the config error can be more helpful
+			return nil, fmt.Errorf("config route references unknown pool: %q", r.Forward.Pool)
+		}
+		handler = p
 	}
 
 	if r.Addr != "" {
@@ -72,14 +84,11 @@ func buildRoute(pools map[string]*downstreamPool, r config.Route) (routeMatcher,
 		if err != nil {
 			return nil, fmt.Errorf("config route defines an invalid address cidr: %w", err)
 		}
-		if r.Drop {
-			return &cidrMatcher{cidr, dns.HandlerFunc(dropHandler)}, nil
-		}
 
-		return &cidrMatcher{cidr: cidr, handler: p}, nil
+		return &cidrMatcher{cidr: cidr, handler: handler}, nil
 	} else if r.Domain == "" {
 		return nil, errors.New("config route must define either an address or a domain")
 	}
 
-	return &domainMatcher{domain: r.Domain, handler: p}, nil
+	return &domainMatcher{domain: r.Domain, handler: handler}, nil
 }
