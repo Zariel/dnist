@@ -44,6 +44,10 @@ func routesFromConf(ctx context.Context, conf *config.Conf, log *zap.Logger) ([]
 		}
 		// TODO: configure the pool with other options
 		for i, server := range pool.Servers {
+			if server.HealthCheck == nil {
+				server.HealthCheck = pool.HealthCheck
+			}
+
 			client, err := newClient(ctx, server, log)
 			if err != nil {
 				// TODO: this will include dial failures which really shouldnt stop us from

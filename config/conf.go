@@ -31,6 +31,8 @@ type Server struct {
 type Pool struct {
 	Name    string
 	Servers []Server
+	// if the server does not specify a health check, this one will be used
+	HealthCheck *HealthCheck
 }
 
 type ForwardPool struct {
