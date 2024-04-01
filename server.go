@@ -2,7 +2,6 @@ package dnist
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -12,9 +11,13 @@ import (
 	"go.uber.org/zap"
 )
 
-type Frontend struct {
+// TODO: what is the correct response code here?
+const dropRCode = dns.RcodeRefused
+
+type Server struct {
 	routes []routeMatcher
 	log    *zap.Logger
+	ctx    context.Context
 }
 
 type request struct {
@@ -23,16 +26,26 @@ type request struct {
 }
 
 type routeMatcher interface {
-	Matches(r request) dns.Handler
+	Matches(r request) handler
+}
+
+type handler interface {
+	ServeDNS(context.Context, dns.ResponseWriter, *dns.Msg)
+}
+
+type handlerFunc func(context.Context, dns.ResponseWriter, *dns.Msg)
+
+func (fn handlerFunc) ServeDNS(ctx context.Context, rw dns.ResponseWriter, msg *dns.Msg) {
+	fn(ctx, rw, msg)
 }
 
 type cidrMatcher struct {
 	cidr netip.Prefix
 
-	handler dns.Handler
+	handler handler
 }
 
-func (c *cidrMatcher) Matches(req request) dns.Handler {
+func (c *cidrMatcher) Matches(req request) handler {
 	if !c.cidr.Contains(req.client) {
 		return nil
 	}
@@ -44,10 +57,10 @@ type domainMatcher struct {
 	// regex?
 	domain string
 
-	handler dns.Handler
+	handler handler
 }
 
-func (d *domainMatcher) Matches(req request) dns.Handler {
+func (d *domainMatcher) Matches(req request) handler {
 	// is this sufficiently correct?
 	if !strings.HasSuffix(req.domain, d.domain) {
 		return nil
@@ -59,21 +72,18 @@ type poolHandler struct {
 	pool *config.Pool
 }
 
-type routeBuilder struct {
-	conf *config.Conf
-	log  *zap.Logger
-
-	pools map[string]*downstreamPool
-}
-
 type downstreamPool struct {
 	clients []*client
 	log     *zap.Logger
 }
 
-func (p *downstreamPool) ServeDNS(rw dns.ResponseWriter, req *dns.Msg) {
+func (p *downstreamPool) ServeDNS(ctx context.Context, rw dns.ResponseWriter, req *dns.Msg) {
 	for _, c := range p.clients {
-		resp, err := c.Send(context.TODO(), req)
+		if !c.health.isUp() {
+			continue
+		}
+
+		resp, err := c.Send(ctx, req)
 		if err != nil {
 			p.log.Error("unable to send request to downstream", zap.Error(err))
 			continue
@@ -89,17 +99,8 @@ func (p *downstreamPool) ServeDNS(rw dns.ResponseWriter, req *dns.Msg) {
 	sendError(rw, req, dns.RcodeServerFailure)
 }
 
-func (b *routeBuilder) getPool(name string) (*downstreamPool, error) {
-	pool, ok := b.pools[name]
-	if !ok {
-		return nil, fmt.Errorf("config route references unknown pool %q", name)
-	}
-	return pool, nil
-}
-
-func dropHandler(w dns.ResponseWriter, r *dns.Msg) {
-	// TODO: what is the correct response code here?
-	sendError(w, r, dns.RcodeRefused)
+func dropHandler(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+	sendError(w, r, dropRCode)
 }
 
 func sendError(rw dns.ResponseWriter, msg *dns.Msg, code int) {
@@ -108,7 +109,7 @@ func sendError(rw dns.ResponseWriter, msg *dns.Msg, code int) {
 	rw.WriteMsg(&answser)
 }
 
-func (f *Frontend) ServeDNS(rw dns.ResponseWriter, msg *dns.Msg) {
+func (f *Server) ServeDNS(rw dns.ResponseWriter, msg *dns.Msg) {
 	log := f.log.With(zap.Stringer("client", rw.RemoteAddr()), zap.Any("questions", msg.Question))
 	log.Debug("handling request")
 
@@ -138,9 +139,11 @@ func (f *Frontend) ServeDNS(rw dns.ResponseWriter, msg *dns.Msg) {
 		domain: msg.Question[0].Name,
 	}
 
+	ctx := f.ctx
+
 	for _, route := range f.routes {
 		if handler := route.Matches(req); handler != nil {
-			handler.ServeDNS(rw, msg)
+			handler.ServeDNS(ctx, rw, msg)
 			return
 		}
 	}
