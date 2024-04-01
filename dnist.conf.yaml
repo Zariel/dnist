@@ -3,14 +3,14 @@ listenaddr: "127.0.0.1:53535"
 listennet: udp
 pools:
   - name: blocky
+    healthcheck:
+      checkName: cloudflare-dns.com.
+      interval: 5s
+      timeout: 2s
+      failureThreshold: 3
+      successThreshold: 1
     servers:
       - addr: 10.5.0.4
-        healthcheck:
-          checkName: cloudflare-dns.com.
-          interval: 5s
-          timeout: 2s
-          failureThreshold: 3
-          successThreshold: 1
   - name: bind
     servers:
       - addr: 10.5.0.3
